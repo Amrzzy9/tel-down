@@ -1,4 +1,4 @@
-import os, re, glob, time, threading, queue, subprocess, shutil, logging, pty, fcntl, termios, struct, select
+import os, re, glob, time, threading, queue, subprocess, shutil, logging, pty, fcntl, termios, struct, select, signal
 import numpy as np, cv2
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
@@ -7,6 +7,7 @@ logging.getLogger('werkzeug').setLevel(logging.ERROR)
 Q = {'moderate': (24, None), 'high': (30, None),
      'higher': (34, "scale=-2:'min(480,ih)',fps=15")}
 TDL, W, O, MARK = '/content/tdl', '/content/work', '/content/out', '/content/tdl_ok'
+STALL_SECONDS, MAX_RETRIES, RETRY_DELAY = 75, 3, 4
 GPU = bool(shutil.which('nvidia-smi'))
 ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 S = {'state': 'out', 'url': '', 'user': ''}
@@ -52,38 +53,161 @@ def tlogin():
             elif rows: S['url'] = decode(rows) or S['url']; rows = []
     if not ok: S.update(state='out', url='')
 
+def _folder_bytes(path):
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try: total += os.path.getsize(os.path.join(root, name))
+            except OSError: pass
+    return total
+
+def _stop_tdl(p):
+    """Ask tdl to exit cleanly first so it can persist its resume state."""
+    if p.poll() is not None: return
+    try: p.send_signal(signal.SIGINT)
+    except OSError: pass
+    deadline = time.monotonic() + 8
+    while p.poll() is None and time.monotonic() < deadline:
+        try:
+            ready, _, _ = select.select([p.stdout], [], [], 0.2)
+            if ready: os.read(p.stdout.fileno(), 8192)
+        except (OSError, ValueError): break
+    if p.poll() is None:
+        try: p.terminate()
+        except OSError: pass
+        try: p.wait(timeout=4)
+        except subprocess.TimeoutExpired:
+            try: p.kill()
+            except OSError: pass
+            p.wait()
+
 def dworker():
     while True:
         j = dq.get()
-        if j['st'] == 'cancelled': continue
-        j['st'] = 'downloading'; d = f"{W}/{j['id']}"
-        try:
-            f = []
-            for extra in ([], ['-t', '1'], ['--pool', '1']):  # 3 tries, different settings
-                shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
-                p = subprocess.Popen([TDL, 'dl', '-u', j['url'], '-d', d] + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                j['proc'] = p; j['dl'] = 0; tail = ''; seen = (0, time.time()); fd = p.stdout.fileno()
-                while True:
-                    if select.select([fd], [], [], 5)[0]:
-                        c = os.read(fd, 4096)
-                        if not c: break
-                        t = ANSI.sub('', c.decode('utf8', 'ignore')); tail = (tail + t)[-300:]
-                        m = re.findall(r'(\d{1,3}(?:\.\d+)?)%', t)
-                        if m: j['dl'] = float(m[-1])
-                        sp = re.findall(r'([\d.]+) ([KMG])B/s', t)
-                        if sp: j['spd'] = float(sp[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[sp[-1][1]]
-                        if j['dl'] > seen[0]: seen = (j['dl'], time.time())
-                    if time.time() - seen[1] > 75: p.kill(); break  # no progress for 75s: restart
-                p.wait()
-                if j.get('cancel'): raise Exception('Stopped')
-                f = [x for x in glob.glob(d + '/*') if os.path.isfile(x) and not x.endswith('.tmp')]
-                if f: break
-            if not f: raise Exception("Telegram never started sending this file (tried 3 times). " + ('' if '%' in tail else tail[-160:].strip()))
-            j['src'] = f[0]; j['dl'] = 100; j['size0'] = os.path.getsize(f[0])
-            j['name'] = os.path.splitext(os.path.basename(f[0]))[0] + '_small.mp4'
-            eq.put(j)
-        except Exception as e:
-            j.update(st='cancelled' if j.get('cancel') else 'error', err=str(e))
+        if j.get('cancel') or j['st'] == 'cancelled':
+            j.update(st='cancelled', err='Stopped')
+            continue
+
+        j['st'] = 'downloading'
+        d = f"{W}/{j['id']}"
+        shutil.rmtree(d, ignore_errors=True)
+        os.makedirs(d, exist_ok=True)
+        last_error = ''
+
+        # One first attempt plus MAX_RETRIES retries. Keep the same output
+        # directory and use tdl's own resume state on every retry.
+        for attempt in range(1, MAX_RETRIES + 2):
+            if j.get('cancel'):
+                last_error = 'Stopped'
+                break
+
+            j['attempt'] = attempt
+            j['spd'] = 0
+            tail = ''
+            stall_reason = ''
+            last_progress = time.monotonic()
+            last_bytes = _folder_bytes(d)
+            last_pct = float(j.get('dl', 0) or 0)
+            p = None
+
+            try:
+                cmd = [TDL, 'dl', '--continue', '-u', j['url'], '-d', d]
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                     bufsize=0)
+                j['proc'] = p
+
+                while p.poll() is None:
+                    try:
+                        ready, _, _ = select.select([p.stdout], [], [], 1.0)
+                        if ready:
+                            chunk = os.read(p.stdout.fileno(), 8192)
+                            if chunk:
+                                out = ANSI.sub('', chunk.decode('utf8', 'ignore'))
+                                tail = (tail + out)[-500:]
+                                percents = re.findall(r'(\d{1,3}(?:\.\d+)?)%', out)
+                                if percents:
+                                    pct = max(0.0, min(100.0, float(percents[-1])))
+                                    if pct > last_pct:
+                                        last_pct = pct
+                                        last_progress = time.monotonic()
+                                    j['dl'] = max(float(j.get('dl', 0) or 0), pct)
+                                speeds = re.findall(r'([\d.]+) ([KMG])B/s', out)
+                                if speeds:
+                                    j['spd'] = float(speeds[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[speeds[-1][1]]
+                    except (OSError, ValueError):
+                        pass
+
+                    current_bytes = _folder_bytes(d)
+                    if current_bytes > last_bytes:
+                        last_bytes = current_bytes
+                        last_progress = time.monotonic()
+
+                    if j.get('cancel'):
+                        _stop_tdl(p)
+                        break
+
+                    if time.monotonic() - last_progress >= STALL_SECONDS:
+                        stall_reason = f'No download progress for {STALL_SECONDS} seconds.'
+                        _stop_tdl(p)
+                        break
+
+                rc = p.wait()
+                j['proc'] = None
+                if j.get('cancel'):
+                    last_error = 'Stopped'
+                    break
+                if stall_reason:
+                    raise TimeoutError(stall_reason + (' ' + tail.strip() if tail.strip() else ''))
+                if rc != 0:
+                    raise RuntimeError(f'tdl exited with code {rc}.' + (' ' + tail.strip() if tail.strip() else ''))
+
+                candidates = []
+                for root, _, files in os.walk(d):
+                    for name in files:
+                        path = os.path.join(root, name)
+                        try:
+                            if os.path.getsize(path) > 0:
+                                candidates.append(path)
+                        except OSError:
+                            pass
+                video_exts = ('.mp4', '.mkv', '.mov', '.webm', '.avi', '.m4v', '.ts')
+                videos = [x for x in candidates if os.path.splitext(x)[1].lower() in video_exts]
+                chosen = max(videos or candidates, key=os.path.getsize) if (videos or candidates) else None
+                if not chosen:
+                    raise RuntimeError('tdl finished but no file was found.' + (' ' + tail.strip() if tail.strip() else ''))
+
+                j['src'] = chosen
+                j['dl'] = 100
+                j['size0'] = os.path.getsize(chosen)
+                j['name'] = os.path.splitext(os.path.basename(chosen))[0] + '_small.mp4'
+                j.pop('attempt', None)
+                eq.put(j)
+                last_error = ''
+                break
+
+            except Exception as e:
+                if p is not None:
+                    if p.poll() is None: _stop_tdl(p)
+                    try: p.wait(timeout=1)
+                    except Exception: pass
+                j['proc'] = None
+                last_error = str(e).strip() or e.__class__.__name__
+                if j.get('cancel'):
+                    last_error = 'Stopped'
+                    break
+                if attempt <= MAX_RETRIES:
+                    j['err'] = f'Attempt {attempt}/{MAX_RETRIES + 1} failed; retrying: {last_error}'
+                    # Keep the partial output and retry after a short pause.
+                    for _ in range(RETRY_DELAY * 10):
+                        if j.get('cancel'): break
+                        time.sleep(0.1)
+                else:
+                    break
+
+        if last_error:
+            j.pop('attempt', None)
+            j.update(st='cancelled' if j.get('cancel') else 'error', err=last_error)
+            j.pop('proc', None)
             shutil.rmtree(d, ignore_errors=True)
 
 def eworker():
