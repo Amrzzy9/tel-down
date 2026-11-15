@@ -78,7 +78,7 @@ def dworker():
                 if j.get('cancel'): raise Exception('Stopped')
                 f = [x for x in glob.glob(d + '/*') if os.path.isfile(x) and not x.endswith('.tmp')]
                 if f: break
-            if not f: raise Exception("Telegram never started sending this file (tried 3 times). " + tail[-160:].strip())
+            if not f: raise Exception("Telegram never started sending this file (tried 3 times). " + ('' if '%' in tail else tail[-160:].strip()))
             j['src'] = f[0]; j['dl'] = 100; j['size0'] = os.path.getsize(f[0])
             j['name'] = os.path.splitext(os.path.basename(f[0]))[0] + '_small.mp4'
             eq.put(j)
