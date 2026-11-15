@@ -1,73 +1,77 @@
-import os, re, time, asyncio, threading, queue, subprocess, shutil, logging
+import os, re, glob, time, threading, queue, subprocess, shutil, logging, pty, fcntl, termios, struct, select
+import numpy as np, cv2
 from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
-from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
-from telethon.tl.types import PeerChannel
 
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 Q = {'moderate': (24, None), 'high': (30, None),
      'higher': (34, "scale=-2:'min(480,ih)',fps=15")}
-W, O = '/content/work', '/content/out'
+TDL, W, O, MARK = '/content/tdl', '/content/work', '/content/out', '/content/tdl_ok'
 GPU = bool(shutil.which('nvidia-smi'))
+ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 S = {'state': 'out', 'url': '', 'user': ''}
-jobs, dq, eq = [], queue.Queue(), queue.Queue()
-loop = asyncio.new_event_loop()
-threading.Thread(target=loop.run_forever, daemon=True).start()
+if os.path.exists(MARK): S.update(state='in', user=open(MARK).read())
+jobs, dq, eq, KEY, MFD = [], queue.Queue(), queue.Queue(), None, None
 app = Flask(__name__); CORS(app)
-C = KEY = None
 
-def run(c): return asyncio.run_coroutine_threadsafe(c, loop).result()
+def decode(rows):
+    w = max(map(len, rows)); rows = [r.ljust(w) for r in rows]
+    bits = []
+    for r in rows:
+        bits.append([c in '█▀' for c in r]); bits.append([c in '█▄' for c in r])
+    b = np.array(bits)
+    for dark in (b, ~b):
+        img = np.pad(np.kron(np.where(dark, 0, 255), np.ones((8, 8))), 40, constant_values=255).astype(np.uint8)
+        t = cv2.QRCodeDetector().detectAndDecode(img)[0]
+        if t: return t
+    return ''
 
-async def done():
-    me = await C.get_me()
-    S.update(state='in', user=me.username and '@' + me.username or me.first_name)
-    await C.get_dialogs()  # lets private /c/ links resolve
-
-async def login():
-    S['state'] = 'qr'
-    try:
-        qr = await C.qr_login()
-        while True:
-            S['url'] = qr.url
-            try: await qr.wait(25); break
-            except asyncio.TimeoutError: await qr.recreate()
-    except SessionPasswordNeededError:
-        S['state'] = 'pw'; return
-    except Exception: S['state'] = 'out'; raise
-    await done()
-
-async def password(p):
-    await C.sign_in(password=p); await done()
-
-def parse(u):
-    m = re.search(r't\.me/(c/)?([^/?]+)((?:/\d+)+)', u.strip())
-    if not m: return None
-    return (PeerChannel(int(m[2])) if m[1] else m[2]), int(m[3].split('/')[-1])
-
-async def dl(j):
-    peer, mid = parse(j['url'])
-    m = await C.get_messages(peer, ids=mid)
-    if not m or not m.media: raise Exception('No media in that message, or no access')
-    t0 = time.time()
-    def cb(a, b):
-        j['dl'] = a * 100 / b; j['spd'] = a / max(time.time() - t0, 1)
-    j['src'] = await C.download_media(m, file=f"{W}/{j['id']}/", progress_callback=cb)
+def tlogin():
+    global MFD
+    S.update(state='qr', url='')
+    m, s = pty.openpty()
+    fcntl.ioctl(s, termios.TIOCSWINSZ, struct.pack('HHHH', 60, 220, 0, 0))
+    p = subprocess.Popen([TDL, 'login', '-T', 'qr'], stdin=s, stdout=s, stderr=s, close_fds=True)
+    os.close(s); MFD = m; buf, rows, ok = '', [], False
+    while True:
+        if not select.select([m], [], [], 0.7)[0]:
+            if rows: S['url'] = decode(rows) or S['url']; rows = []
+            if p.poll() is not None: break
+            continue
+        try: d = os.read(m, 4096)
+        except OSError: break
+        if not d: break
+        txt = ANSI.sub('', d.decode('utf8', 'ignore')).replace('\r', '')
+        if 'assword' in txt: S['state'] = 'pw'
+        r = re.search(r'Login successfully.*?ID: (\d+)(?:, Username: (\S*))?', txt)
+        if r:
+            ok = True; S.update(state='in', user='@' + r[2] if r[2] else 'ID ' + r[1]); open(MARK, 'w').write(S['user'])
+        buf += txt; *lines, buf = buf.split('\n')
+        for l in lines:
+            if l.strip() and set(l) <= set(' █▀▄'): rows.append(l)
+            elif rows: S['url'] = decode(rows) or S['url']; rows = []
+    if not ok: S.update(state='out', url='')
 
 def dworker():
     while True:
-        j = dq.get(); j['st'] = 'downloading'
+        j = dq.get(); j['st'] = 'downloading'; d = f"{W}/{j['id']}"
         try:
-            os.makedirs(f"{W}/{j['id']}", exist_ok=True)
-            for n in range(3):
-                try: run(dl(j)); break
-                except Exception as e:
-                    if n == 2 or 'No media' in str(e): raise
-                    j['err'] = f'Retrying ({n + 1}/3): {e}'; time.sleep(5)
-            j['err'] = ''; j['dl'] = 100; j['size0'] = os.path.getsize(j['src'])
-            j['name'] = os.path.splitext(os.path.basename(j['src']))[0] + '_small.mp4'
+            shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
+            p = subprocess.Popen([TDL, 'dl', '-u', j['url'], '-d', d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            tail = ''
+            while c := os.read(p.stdout.fileno(), 4096):
+                t = ANSI.sub('', c.decode('utf8', 'ignore')); tail = (tail + t)[-300:]
+                m = re.findall(r'(\d{1,3}(?:\.\d+)?)%', t)
+                if m: j['dl'] = float(m[-1])
+                s = re.findall(r'([\d.]+) ([KMG])B/s', t)
+                if s: j['spd'] = float(s[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[s[-1][1]]
+            p.wait()
+            f = [x for x in glob.glob(d + '/*') if os.path.isfile(x)]
+            if not f: raise Exception('Nothing downloaded: no access, not a video, or Telegram not linked. ' + tail[-160:].strip())
+            j['src'] = f[0]; j['dl'] = 100; j['size0'] = os.path.getsize(f[0])
+            j['name'] = os.path.splitext(os.path.basename(f[0]))[0] + '_small.mp4'
             eq.put(j)
-        except Exception as e: j.update(st='error', err=str(e) or repr(e))
+        except Exception as e: j.update(st='error', err=str(e))
 
 def eworker():
     while True:
@@ -105,14 +109,13 @@ def status():
 @app.post('/api/login')
 def api_login():
     auth()
-    if S['state'] == 'out': asyncio.run_coroutine_threadsafe(login(), loop)
+    if S['state'] == 'out': threading.Thread(target=tlogin, daemon=True).start()
     return jsonify(ok=1)
 
 @app.post('/api/password')
 def api_pw():
     auth()
-    try: run(password(request.json.get('pw', '')))
-    except Exception as e: return jsonify(err=str(e)), 400
+    if MFD: os.write(MFD, (request.json.get('pw', '') + '\n').encode())
     return jsonify(ok=1)
 
 @app.post('/api/jobs')
@@ -120,7 +123,7 @@ def api_jobs():
     auth(); b = request.json
     if S['state'] != 'in': return jsonify(err='Link Telegram first'), 400
     if b.get('q') not in Q: return jsonify(err='Pick a quality'), 400
-    bad = [u for u in b.get('links', []) if not parse(u)]
+    bad = [u for u in b.get('links', []) if not re.search(r't\.me/(c/)?[^/?]+(/\d+)+', u)]
     if bad: return jsonify(err='Not a Telegram message link: ' + bad[0]), 400
     for u in b['links']:
         j = dict(id=len(jobs) + 1, url=u.strip(), q=b['q'], st='queued', dl=0, enc=0, spd=0, size0=0, size1=0, name='', err='')
@@ -133,11 +136,7 @@ def api_file(i):
     if j['st'] != 'done': abort(404)
     return send_file(j['file'], as_attachment=True, download_name=j['name'])
 
-def serve(api_id, api_hash, key, port=8000):
-    global C, KEY; KEY = key
-    async def mk(): return TelegramClient('/content/tg', api_id, api_hash, request_retries=15,
-                                          connection_retries=15, retry_delay=3, timeout=30)
-    C = run(mk()); run(C.connect())
-    if run(C.is_user_authorized()): run(done())
+def serve(key, port=8000):
+    global KEY; KEY = key
     for f in (dworker, eworker): threading.Thread(target=f, daemon=True).start()
     threading.Thread(target=lambda: app.run(port=port, threaded=True), daemon=True).start()
