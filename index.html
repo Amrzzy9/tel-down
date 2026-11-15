@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Relay</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+<style>
+:root{--bg:#050505;--pn:#0e0a0a;--ln:#2a1618;--red:#d0102c;--hi:#ff4256;--tx:#f4ecec;--mu:#9a8688;--ok:#3ddc84;--am:#ffb020}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(900px 420px at 88% -10%,#3b0711 0,transparent 70%),var(--bg);color:var(--tx);font:15px/1.55 Sora,system-ui,sans-serif}
+main{max-width:880px;margin:0 auto;padding:20px 18px 60px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:10px 0 26px}
+.brand{font-weight:700;font-size:22px;letter-spacing:-.02em;display:flex;align-items:center;gap:10px}
+.brand i{width:14px;height:14px;background:var(--red);transform:rotate(45deg);box-shadow:0 0 18px var(--red)}
+.pills{display:flex;flex-wrap:wrap;gap:8px}
+.pill{display:flex;align-items:center;gap:8px;border:1px solid var(--ln);background:var(--pn);border-radius:99px;padding:5px 13px;font-size:13px;color:var(--mu)}
+.pill b{width:8px;height:8px;border-radius:50%;background:var(--red)}
+.pill.on b{background:var(--ok)}.pill.wait b{background:var(--am);animation:p 1s infinite alternate}
+@keyframes p{to{opacity:.25}}
+section{background:var(--pn);border:1px solid var(--ln);border-left:3px solid var(--red);border-radius:4px;padding:20px 22px;margin-bottom:16px}
+h2{margin:0 0 4px;font-size:17px;font-weight:600}
+p.h{margin:0 0 14px;color:var(--mu);font-size:13px}
+input[type=text],input[type=password]{width:100%;background:#080606;border:1px solid var(--ln);color:var(--tx);border-radius:4px;padding:11px 13px;font:inherit;font-size:14px}
+input:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--hi);outline-offset:1px}
+.btn{background:var(--red);color:#fff;border:0;border-radius:4px;padding:11px 20px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+.btn:hover{background:var(--hi)}.btn:disabled{background:#2a1618;color:var(--mu);cursor:not-allowed}
+.flex{display:flex;gap:10px}.flex input{flex:1}
+.row{display:flex;gap:8px;margin-bottom:8px}.row input{flex:1}
+.x{background:none;border:1px solid var(--ln);color:var(--mu);width:42px;border-radius:4px;cursor:pointer;font-size:18px}.x:hover{color:var(--hi);border-color:var(--red)}
+kbd{border:1px solid var(--ln);border-radius:3px;padding:0 5px;font:12px Sora,sans-serif;color:var(--tx)}
+.q{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:16px 0}
+.q label{border:1px solid var(--ln);border-radius:4px;padding:12px 14px;cursor:pointer;display:block}
+.q label:has(input:checked){border-color:var(--red);background:#1a0a0d}
+.q input{position:absolute;opacity:0}.q label:has(input:focus-visible){outline:2px solid var(--hi)}
+.q b{display:block;font-weight:600}.q span{color:var(--mu);font-size:13px}
+#qrbox{display:flex;gap:20px;align-items:center;flex-wrap:wrap}
+#qr{background:#fff;padding:10px;border-radius:4px;line-height:0}
+.job{border-top:1px solid var(--ln);padding:14px 0}.job:first-child{border:0}
+.top{display:flex;justify-content:space-between;gap:12px;align-items:center}
+.nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
+.st{font-size:12px;color:var(--mu);white-space:nowrap}.st.err{color:var(--hi)}.st.ok{color:var(--ok)}
+.bl{display:flex;justify-content:space-between;font-size:12px;color:var(--mu);margin:9px 0 3px}
+.bar{height:6px;background:#1c1012;border-radius:3px;overflow:hidden}.bar b{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--hi));transition:width .6s}
+.res{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:14px}
+.btn.sm{padding:7px 16px;font-size:13px}
+#msg{color:var(--hi);font-size:13px;min-height:20px;margin-left:12px}
+[hidden]{display:none!important}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head><body><main>
+<header><div class="brand"><i></i>Relay</div>
+<div class="pills"><div class="pill" id="pc"><b></b><span>Colab</span></div><div class="pill" id="pt"><b></b><span>Telegram</span></div></div></header>
+
+<section><h2>1 · Connect Colab</h2><p class="h">Run the Colab cell, then paste the link or code it prints. It connects on its own if you open the printed link.</p>
+<div class="flex"><input type="text" id="code" placeholder="https://….trycloudflare.com|key" spellcheck="false"><button class="btn" id="cn">Connect</button></div></section>
+
+<section><h2>2 · Link Telegram</h2><p class="h">Start the service and scan the code with your phone. It stays linked until the Colab session ends.</p>
+<button class="btn" id="go" disabled>Start service</button>
+<div id="qrbox" hidden><div id="qr"></div><div>Open Telegram on your phone<br>Settings → Devices → Link Desktop Device<br><span style="color:var(--mu);font-size:13px">The code refreshes by itself.</span></div></div>
+<div id="pwbox" hidden><p class="h">Two-step verification is on. Enter your Telegram password.</p><div class="flex"><input type="password" id="pw"><button class="btn" id="pwb">Unlock</button></div></div>
+<div id="tgok" hidden style="color:var(--ok)"></div></section>
+
+<section><h2>3 · Download and shrink</h2><p class="h">One link per box. Press <kbd>Alt</kbd>+<kbd>Enter</kbd> to add another. Works with t.me/channel/123, t.me/channel/topic/123 and t.me/c/123/456.</p>
+<div id="rows"></div>
+<div class="q">
+<label><input type="radio" name="q" value="moderate"><b>Moderate</b><span>No visible quality loss.</span></label>
+<label><input type="radio" name="q" value="high" checked><b>High</b><span>Smaller file, slight quality loss.</span></label>
+<label><input type="radio" name="q" value="higher"><b>Higher</b><span>Smallest file. 480p, 15 fps.</span></label></div>
+<button class="btn" id="st" disabled>Start</button><span id="msg"></span></section>
+
+<section><h2>Queue</h2><div id="jobs"><p class="h" style="margin:0">Nothing here yet. Added links appear with live progress.</p></div></section>
+</main>
+<script>
+const $=s=>document.querySelector(s);
+let cfg=JSON.parse(localStorage.relay||'null'),fails=0,seen=false,qrUrl='',ready={c:false,t:false};
+function setCfg(v){v=v.trim();if(v.includes('#'))v=v.split('#').pop();const[u,k]=v.split('|');if(!/^https:\/\//.test(u||'')||!k)return false;
+ cfg={u:u.replace(/\/$/,''),k};localStorage.relay=JSON.stringify(cfg);fails=0;seen=false;return true}
+const api=async(p,o={})=>{const r=await fetch(cfg.u+'/api/'+p,{...o,headers:{'X-Key':cfg.k,'Content-Type':'application/json'},signal:AbortSignal.timeout(6000)});
+ if(!r.ok){let m;try{m=(await r.json()).err}catch{}throw new Error(m||(r.status==401?'Wrong key':'HTTP '+r.status))}return r.json()};
+const pill=(id,cls,t)=>{$(id).className='pill '+cls;$(id).lastChild.textContent=t};
+const MB=b=>(b/1048576).toFixed(0)+' MB';
+function addRow(after){const d=document.createElement('div');d.className='row';
+ d.innerHTML='<input type="text" placeholder="https://t.me/channel/123" spellcheck="false"><button class="x" title="Remove" aria-label="Remove link">×</button>';
+ const i=d.firstChild;i.onkeydown=e=>{if(e.altKey&&e.key==='Enter'){e.preventDefault();addRow(d)}};
+ d.lastChild.onclick=()=>{if($('#rows').children.length>1)d.remove()};
+ after?after.after(d):$('#rows').append(d);i.focus()}
+function render(s){
+ pill('#pc','on','Online · '+(s.gpu?'GPU':'CPU only'));ready.c=true;
+ const t=s.tg,L={out:['','Telegram not linked'],qr:['wait','Waiting for scan'],pw:['wait','Password needed'],in:['on',t.user]}[t.state];
+ pill('#pt',L[0],L[1]);ready.t=t.state==='in';
+ $('#go').hidden=t.state!=='out';$('#qrbox').hidden=t.state!=='qr';$('#pwbox').hidden=t.state!=='pw';$('#tgok').hidden=!ready.t;
+ if(ready.t)$('#tgok').textContent='Connected as '+t.user;
+ if(t.state==='qr'&&t.url&&t.url!==qrUrl){qrUrl=t.url;$('#qr').innerHTML='';new QRCode($('#qr'),{text:t.url,width:200,height:200,colorDark:'#000',colorLight:'#fff'})}
+ $('#go').disabled=false;$('#st').disabled=!ready.t;
+ if(s.jobs.length)$('#jobs').innerHTML=s.jobs.slice().reverse().map(j=>{
+  const lab={queued:'Waiting',downloading:'Downloading',shrinking:'Shrinking',done:'Done',error:'Failed'}[j.st];
+  const bar=(n,v,x='')=>`<div class="bl"><span>${n}</span><span>${v.toFixed(0)}%${x}</span></div><div class="bar"><b style="width:${v}%"></b></div>`;
+  return `<div class="job"><div class="top"><div class="nm">${j.name.replace(/_small\.mp4$/,'')||j.url}</div><div class="st ${j.st=='error'?'err':j.st=='done'?'ok':''}">${lab} · ${j.q}</div></div>`+
+  (j.st=='error'?`<div class="st err" style="margin-top:6px;white-space:normal">${j.err}</div>`:
+  bar('Download',j.dl,j.st=='downloading'&&j.spd?' · '+(j.spd/1048576).toFixed(1)+' MB/s':'')+(j.st=='queued'||j.st=='downloading'?'':bar('Shrink',j.enc))+
+  (j.st=='done'?`<div class="res"><span>${MB(j.size0)} → ${MB(j.size1)} (−${Math.max(0,Math.round(100-j.size1/j.size0*100))}%)</span><a class="btn sm" href="${cfg.u}/api/file/${j.id}?k=${encodeURIComponent(cfg.k)}" download>Save file</a></div>`:''))+'</div>'}).join('')}
+async function poll(){
+ if(cfg){try{render(await api('status'));fails=0;seen=true}catch(e){fails++;ready.c=false;ready.t=false;$('#st').disabled=true;$('#go').disabled=true;
+  (seen?fails>2:fails>12)?pill('#pc','','Offline'):pill('#pc','wait','Connecting…')}}
+ else pill('#pc','','Not set up');
+ setTimeout(poll,1500)}
+$('#cn').onclick=()=>{if(setCfg($('#code').value)){$('#code').value='';pill('#pc','wait','Connecting…')}else $('#msg').textContent='Paste the full code: https://…|key'};
+$('#go').onclick=()=>api('login',{method:'POST'}).catch(e=>$('#msg').textContent=e.message);
+$('#pwb').onclick=()=>api('password',{method:'POST',body:JSON.stringify({pw:$('#pw').value})}).then(()=>$('#pw').value='').catch(e=>alert(e.message));
+$('#st').onclick=async()=>{const links=[...document.querySelectorAll('#rows input')].map(i=>i.value.trim()).filter(Boolean);
+ if(!links.length){$('#msg').textContent='Add at least one link.';return}
+ try{await api('jobs',{method:'POST',body:JSON.stringify({links,q:document.querySelector('input[name=q]:checked').value})});
+  $('#rows').innerHTML='';addRow();$('#msg').textContent=''}catch(e){$('#msg').textContent=e.message}};
+if(location.hash.length>10&&setCfg(location.hash.slice(1)))history.replaceState(null,'',location.pathname);
+addRow();poll();
+</script></body></html>
