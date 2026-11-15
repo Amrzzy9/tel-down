@@ -43,6 +43,8 @@ kbd{border:1px solid var(--ln);border-radius:3px;padding:0 5px;font:12px Sora,sa
 .res{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:14px}
 .btn.sm{padding:7px 16px;font-size:13px}
 #msg{color:var(--hi);font-size:13px;min-height:20px;margin-left:12px}
+.stop{background:none;border:1px solid var(--ln);color:var(--hi);border-radius:4px;padding:2px 12px;font:inherit;font-size:12px;cursor:pointer;margin-left:8px}.stop:hover{border-color:var(--red)}
+.hd{margin:20px 0 2px;font-weight:600;font-size:14px;color:var(--mu);display:flex;justify-content:space-between}.hd button{background:none;border:0;color:var(--mu);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline}
 [hidden]{display:none!important}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style></head><body><main>
@@ -66,7 +68,7 @@ kbd{border:1px solid var(--ln);border-radius:3px;padding:0 5px;font:12px Sora,sa
 <label><input type="radio" name="q" value="higher"><b>Higher</b><span>Smallest file. 480p, 15 fps.</span></label></div>
 <button class="btn" id="st" disabled>Start</button><span id="msg"></span></section>
 
-<section><h2>Queue</h2><div id="jobs"><p class="h" style="margin:0">Nothing here yet. Added links appear with live progress.</p></div></section>
+<section><h2>Queue and history</h2><div id="jobs"><p class="h" style="margin:0">Nothing here yet. Added links appear with live progress.</p></div></section>
 </main>
 <script>
 const $=s=>document.querySelector(s);
@@ -90,13 +92,26 @@ function render(s){
  if(ready.t)$('#tgok').textContent='Connected as '+t.user;
  if(t.state==='qr'&&t.url&&t.url!==qrUrl){qrUrl=t.url;$('#qr').innerHTML='';new QRCode($('#qr'),{text:t.url,width:200,height:200,colorDark:'#000',colorLight:'#fff'})}
  $('#go').disabled=false;$('#st').disabled=!ready.t;
- if(s.jobs.length)$('#jobs').innerHTML=s.jobs.slice().reverse().map(j=>{
-  const lab={queued:'Waiting',downloading:'Downloading',shrinking:'Shrinking',done:'Done',error:'Failed'}[j.st];
-  const bar=(n,v,x='')=>`<div class="bl"><span>${n}</span><span>${v.toFixed(0)}%${x}</span></div><div class="bar"><b style="width:${v}%"></b></div>`;
-  return `<div class="job"><div class="top"><div class="nm">${j.name.replace(/_small\.mp4$/,'')||j.url}</div><div class="st ${j.st=='error'?'err':j.st=='done'?'ok':''}">${lab} · ${j.q}</div></div>`+
-  (j.st=='error'?`<div class="st err" style="margin-top:6px;white-space:normal">${j.err}</div>`:
-  bar('Download',j.dl,j.st=='downloading'&&j.spd?' · '+(j.spd/1048576).toFixed(1)+' MB/s':'')+(j.st=='queued'||j.st=='downloading'?'':bar('Shrink',j.enc))+
-  (j.st=='done'?`<div class="res"><span>${MB(j.size0)} → ${MB(j.size1)} (−${Math.max(0,Math.round(100-j.size1/j.size0*100))}%)</span><a class="btn sm" href="${cfg.u}/api/file/${j.id}?k=${encodeURIComponent(cfg.k)}" download>Save file</a></div>`:''))+'</div>'}).join('')}
+ LIVE=s.jobs;saveHist(s.jobs);drawJobs(s.jobs)}
+let LIVE=[];
+const LAB={queued:'Waiting',downloading:'Downloading',shrinking:'Shrinking',done:'Done',error:'Failed',cancelled:'Stopped'},RUN=['queued','downloading','shrinking'];
+const E=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const fmt=t=>new Date(t).toLocaleString([],{dateStyle:'medium',timeStyle:'short'});
+const bar=(n,v,x='')=>`<div class="bl"><span>${n}</span><span>${v.toFixed(0)}%${x}</span></div><div class="bar"><b style="width:${v}%"></b></div>`;
+const cls=s=>s=='error'?'err':s=='done'?'ok':'';
+function card(j){
+ return `<div class="job"><div class="top"><div class="nm">${E(j.name.replace(/_small\.mp4$/,'')||j.url)}</div><div class="st ${cls(j.st)}">${LAB[j.st]} · ${j.q}${RUN.includes(j.st)?`<button class="stop" data-stop="${j.id}">Stop</button>`:''}</div></div><div class="st" style="margin-top:2px">${fmt(j.ts)}</div>`+
+ (j.st=='error'||j.st=='cancelled'?`<div class="st ${cls(j.st)}" style="margin-top:6px;white-space:normal">${E(j.err)}</div>`:
+ bar('Download',j.dl,j.st=='downloading'&&j.spd?' · '+(j.spd/1048576).toFixed(1)+' MB/s':'')+(j.st=='queued'||j.st=='downloading'?'':bar('Shrink',j.enc))+
+ (j.st=='done'?`<div class="res"><span>${MB(j.size0)} → ${MB(j.size1)} (−${Math.max(0,Math.round(100-j.size1/j.size0*100))}%)</span><a class="btn sm" href="${cfg.u}/api/file/${j.id}?k=${encodeURIComponent(cfg.k)}" download>Save file</a></div>`:''))+'</div>'}
+function hrow(h){const run=RUN.includes(h.st),st=run?'error':h.st,e=run?'Interrupted: Colab stopped or disconnected':h.err;
+ return `<div class="job"><div class="top"><div class="nm">${E((h.name||'').replace(/_small\.mp4$/,'')||h.url)}</div><div class="st ${cls(st)}">${LAB[st]} · ${h.q}</div></div><div class="st" style="margin-top:2px;white-space:normal">${fmt(h.ts)}${st=='done'?' · '+MB(h.s0)+' → '+MB(h.s1)+' · file no longer on Colab':''}${e?' · '+E(e):''}</div></div>`}
+const loadH=()=>{try{return JSON.parse(localStorage.relayH||'{}')}catch{return{}}};
+function saveHist(jobs){const h=loadH();jobs.forEach(j=>h[j.ts+'-'+j.id]={ts:j.ts,url:j.url,q:j.q,st:j.st,name:j.name,s0:j.size0,s1:j.size1,err:j.err});
+ Object.keys(h).sort((a,b)=>h[b].ts-h[a].ts).slice(60).forEach(k=>delete h[k]);localStorage.relayH=JSON.stringify(h)}
+function drawJobs(jobs){const live=new Set(jobs.map(j=>j.ts+'-'+j.id)),h=loadH(),old=Object.keys(h).filter(k=>!live.has(k)).sort((a,b)=>h[b].ts-h[a].ts);
+ $('#jobs').innerHTML=(jobs.length||old.length?'':'<p class="h" style="margin:0">Nothing here yet. Added links appear with live progress.</p>')+jobs.slice().reverse().map(card).join('')+
+ (old.length?'<div class="hd"><span>History</span><button id="clr">Clear history</button></div>'+old.map(k=>hrow(h[k])).join(''):'')}
 async function poll(){
  if(cfg){try{render(await api('status'));fails=0;seen=true}catch(e){fails++;ready.c=false;ready.t=false;$('#st').disabled=true;$('#go').disabled=true;
   (seen?fails>2:fails>12)?pill('#pc','','Offline'):pill('#pc','wait','Connecting…')}}
@@ -110,5 +125,8 @@ $('#st').onclick=async()=>{const links=[...document.querySelectorAll('#rows inpu
  try{await api('jobs',{method:'POST',body:JSON.stringify({links,q:document.querySelector('input[name=q]:checked').value})});
   $('#rows').innerHTML='';addRow();$('#msg').textContent=''}catch(e){$('#msg').textContent=e.message}};
 if(location.hash.length>10&&setCfg(location.hash.slice(1)))history.replaceState(null,'',location.pathname);
-addRow();poll();
+$('#jobs').onclick=e=>{const b=e.target.closest('[data-stop]');
+ if(b){b.disabled=true;api('cancel/'+b.dataset.stop,{method:'POST'}).catch(x=>$('#msg').textContent=x.message)}
+ if(e.target.id=='clr'){localStorage.removeItem('relayH');saveHist(LIVE);drawJobs(LIVE)}};
+addRow();drawJobs([]);poll();
 </script></body></html>
