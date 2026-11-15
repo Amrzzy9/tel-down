@@ -54,11 +54,13 @@ def tlogin():
 
 def dworker():
     while True:
-        j = dq.get(); j['st'] = 'downloading'; d = f"{W}/{j['id']}"
+        j = dq.get()
+        if j['st'] == 'cancelled': continue
+        j['st'] = 'downloading'; d = f"{W}/{j['id']}"
         try:
             shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
             p = subprocess.Popen([TDL, 'dl', '-u', j['url'], '-d', d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            tail = ''
+            j['proc'] = p; tail = ''
             while c := os.read(p.stdout.fileno(), 4096):
                 t = ANSI.sub('', c.decode('utf8', 'ignore')); tail = (tail + t)[-300:]
                 m = re.findall(r'(\d{1,3}(?:\.\d+)?)%', t)
@@ -66,16 +68,22 @@ def dworker():
                 s = re.findall(r'([\d.]+) ([KMG])B/s', t)
                 if s: j['spd'] = float(s[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[s[-1][1]]
             p.wait()
+            if j.get('cancel'): raise Exception('Stopped')
             f = [x for x in glob.glob(d + '/*') if os.path.isfile(x)]
             if not f: raise Exception('Nothing downloaded: no access, not a video, or Telegram not linked. ' + tail[-160:].strip())
             j['src'] = f[0]; j['dl'] = 100; j['size0'] = os.path.getsize(f[0])
             j['name'] = os.path.splitext(os.path.basename(f[0]))[0] + '_small.mp4'
             eq.put(j)
-        except Exception as e: j.update(st='error', err=str(e))
+        except Exception as e:
+            j.update(st='cancelled' if j.get('cancel') else 'error', err=str(e))
+            shutil.rmtree(d, ignore_errors=True)
 
 def eworker():
     while True:
-        j = eq.get(); j['st'] = 'shrinking'
+        j = eq.get()
+        if j.get('cancel'):
+            j.update(st='cancelled', err='Stopped'); shutil.rmtree(f"{W}/{j['id']}", ignore_errors=True); continue
+        j['st'] = 'shrinking'
         try:
             src = j['src']; cq, vf = Q[j['q']]
             try: d = float(subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
@@ -87,16 +95,20 @@ def eworker():
             c += (['-c:v', 'hevc_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', str(cq), '-b:v', '0', '-tag:v', 'hvc1']
                   if GPU else ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', str(cq - 2)])
             p = subprocess.Popen(c + ['-c:a', 'aac', '-b:a', '64k', out], stdout=subprocess.PIPE, text=True)
+            j['proc'] = p
             for l in p.stdout:
                 if l.startswith('out_time_us='):
                     try: j['enc'] = min(99, int(l[12:]) / 1e6 / d * 100)
                     except ValueError: pass
             p.wait()
+            if j.get('cancel'): raise Exception('Stopped')
             if p.returncode or not os.path.exists(out): raise Exception('ffmpeg failed')
             if os.path.getsize(out) >= j['size0']: shutil.copy(src, out)  # never return a bigger file
             j.update(enc=100, size1=os.path.getsize(out), file=out, st='done')
             shutil.rmtree(f"{W}/{j['id']}", ignore_errors=True)
-        except Exception as e: j.update(st='error', err=str(e))
+        except Exception as e:
+            j.update(st='cancelled' if j.get('cancel') else 'error', err=str(e))
+            shutil.rmtree(f"{W}/{j['id']}", ignore_errors=True)
 
 def auth():
     if request.headers.get('X-Key', request.args.get('k')) != KEY: abort(401)
@@ -104,7 +116,7 @@ def auth():
 @app.get('/api/status')
 def status():
     auth()
-    return jsonify(tg=S, gpu=GPU, jobs=[{k: v for k, v in j.items() if k not in ('src', 'file')} for j in jobs])
+    return jsonify(tg=S, gpu=GPU, jobs=[{k: v for k, v in j.items() if k not in ('src', 'file', 'proc')} for j in jobs])
 
 @app.post('/api/login')
 def api_login():
@@ -126,8 +138,17 @@ def api_jobs():
     bad = [u for u in b.get('links', []) if not re.search(r't\.me/(c/)?[^/?]+(/\d+)+', u)]
     if bad: return jsonify(err='Not a Telegram message link: ' + bad[0]), 400
     for u in b['links']:
-        j = dict(id=len(jobs) + 1, url=u.strip(), q=b['q'], st='queued', dl=0, enc=0, spd=0, size0=0, size1=0, name='', err='')
+        j = dict(id=len(jobs) + 1, ts=int(time.time() * 1000), url=u.strip(), q=b['q'], st='queued', dl=0, enc=0, spd=0, size0=0, size1=0, name='', err='')
         jobs.append(j); dq.put(j)
+    return jsonify(ok=1)
+
+@app.post('/api/cancel/<int:i>')
+def api_cancel(i):
+    auth(); j = jobs[i - 1]
+    if j['st'] == 'queued': j.update(st='cancelled', err='Stopped')
+    elif j['st'] in ('downloading', 'shrinking'):
+        j['cancel'] = True
+        if j.get('proc'): j['proc'].kill()
     return jsonify(ok=1)
 
 @app.get('/api/file/<int:i>')
