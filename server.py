@@ -58,19 +58,27 @@ def dworker():
         if j['st'] == 'cancelled': continue
         j['st'] = 'downloading'; d = f"{W}/{j['id']}"
         try:
-            shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
-            p = subprocess.Popen([TDL, 'dl', '-u', j['url'], '-d', d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-            j['proc'] = p; tail = ''
-            while c := os.read(p.stdout.fileno(), 4096):
-                t = ANSI.sub('', c.decode('utf8', 'ignore')); tail = (tail + t)[-300:]
-                m = re.findall(r'(\d{1,3}(?:\.\d+)?)%', t)
-                if m: j['dl'] = float(m[-1])
-                s = re.findall(r'([\d.]+) ([KMG])B/s', t)
-                if s: j['spd'] = float(s[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[s[-1][1]]
-            p.wait()
-            if j.get('cancel'): raise Exception('Stopped')
-            f = [x for x in glob.glob(d + '/*') if os.path.isfile(x)]
-            if not f: raise Exception('Nothing downloaded: no access, not a video, or Telegram not linked. ' + tail[-160:].strip())
+            f = []
+            for extra in ([], ['-t', '1'], ['--pool', '1']):  # 3 tries, different settings
+                shutil.rmtree(d, ignore_errors=True); os.makedirs(d)
+                p = subprocess.Popen([TDL, 'dl', '-u', j['url'], '-d', d] + extra, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                j['proc'] = p; j['dl'] = 0; tail = ''; seen = (0, time.time()); fd = p.stdout.fileno()
+                while True:
+                    if select.select([fd], [], [], 5)[0]:
+                        c = os.read(fd, 4096)
+                        if not c: break
+                        t = ANSI.sub('', c.decode('utf8', 'ignore')); tail = (tail + t)[-300:]
+                        m = re.findall(r'(\d{1,3}(?:\.\d+)?)%', t)
+                        if m: j['dl'] = float(m[-1])
+                        sp = re.findall(r'([\d.]+) ([KMG])B/s', t)
+                        if sp: j['spd'] = float(sp[-1][0]) * {'K': 1e3, 'M': 1048576, 'G': 1e9}[sp[-1][1]]
+                        if j['dl'] > seen[0]: seen = (j['dl'], time.time())
+                    if time.time() - seen[1] > 75: p.kill(); break  # no progress for 75s: restart
+                p.wait()
+                if j.get('cancel'): raise Exception('Stopped')
+                f = [x for x in glob.glob(d + '/*') if os.path.isfile(x) and not x.endswith('.tmp')]
+                if f: break
+            if not f: raise Exception("Telegram never started sending this file (tried 3 times). " + tail[-160:].strip())
             j['src'] = f[0]; j['dl'] = 100; j['size0'] = os.path.getsize(f[0])
             j['name'] = os.path.splitext(os.path.basename(f[0]))[0] + '_small.mp4'
             eq.put(j)
